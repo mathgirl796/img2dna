@@ -1,12 +1,14 @@
 import cv2
-from utils import *
+from apps import *
 
 import warnings
 import sys
+import contextlib
+import datetime
 
+# 遇到运行时警告直接退出程序
 def warn_and_exit(message, category, filename, lineno, file=None, line=None):
     sys.exit(message)
-
 warnings.simplefilter('always', RuntimeWarning)
 warnings.showwarning = warn_and_exit
 warnings.filterwarnings('error', category=RuntimeWarning)
@@ -21,89 +23,75 @@ yuv should be converted to np.float32 before thrown into dct()
 img should be converted to np.uint8 before thrown into cv2.imshow()
 """
 
-def img2dna(img:np.ndarray):
-    """
-    input: cv2.imread(FILE_NAME, cv2.IMREAD_COLOR)
-    output: str of dna sequence
-    """
-    yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-    yuv = yuv
-    img_shape = yuv.shape[:-1]
-    jpeg_raws = []
-    # get jpeg zigzag raw
-    for i, c in enumerate(split_channels(yuv)):
-        c = pad(c, base=8).astype(np.float32) # smoothly pad
-        pad_shape = c.shape
-        c = dct88(c)
-        c = quantify88(c, luminance_quantization_table if i == 0 else chrominance_quantization_table, np.int8)
-        c = dc_delta88(c)
-        c = zigzag88(c)
-        jpeg_raws.append(c)
-    
-    # convert to dna
-    dna = ""
-    for raw in jpeg_raws:
-        dna += bytes2dna(raw)
-    
-    # return
-    return dna, img_shape, pad_shape
+def test_encode_decode(file_name, crop_side_len=None):
+    assert_file_exist(file_name)
+    img=cv2.imread(file_name, cv2.IMREAD_COLOR)
+    if crop_side_len:
+        img = center_crop(img, crop_side_len)
+    print(f"img.shape:{img.shape}")
+    dna, img_shape, pad_shape = img2dna(img)
+    c = dna2img(dna, img_shape, pad_shape)
+    err = np.abs(img.astype(np.float32) - c.astype(np.float32))
+    print("loss", np.sum(err)/err.size)
+    cv2.imshow(file_name, img)
+    cv2.imshow("rebuild", c)
+    cv2.waitKey(0) 
+    cv2.destroyAllWindows()
 
-def dna2img(dna:str, img_shape, pad_shape):
-    """
-    img_shape, pad_shape: (height, width)
-    """
-    jpeg_raws = dna2bytes(dna).reshape(3, -1)
-    channels = []
-    for i, raw in enumerate(jpeg_raws):
-        c = izigzag88(raw, *pad_shape)
-        c = dc_idelta88(c)
-        c = iquantify88(c, luminance_quantization_table if i == 0 else chrominance_quantization_table, iquantify_type=np.float32)
-        c = idct88(c).astype(np.uint8)
-        c = ipad(c, *img_shape)
-        channels.append(c)
-    yuv = np.dstack(channels)
-    print(yuv.shape, yuv.dtype)
-    return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
-    
+def test_count_kmer(file_name, kmer_len=256, crop_side_len=512, save_dna_txt=False):
+    assert_file_exist(file_name)
+    # 读取文件
+    img=cv2.imread(file_name, cv2.IMREAD_COLOR)
+    img = center_crop(img, crop_side_len)
+    print(f"img.shape:{img.shape}")
+    dna, img_shape, pad_shape = img2dna(img)
+    if save_dna_txt:
+        with open(f"{file_name}.txt", "w", encoding="utf8") as f:
+            f.write(dna)
+    print(f"dna_len:{len(dna)}, base_count:{Counter(dna)}")
+    counter = count_kmers(dna, kmer_len)
+    print("unique kmer: ", len(counter))
+    return counter
 
-img=cv2.imread("lena_std.tif", cv2.IMREAD_COLOR)
-dna, img_shape, pad_shape = img2dna(img)
-img = dna2img(dna, img_shape, pad_shape)
-cv2.imshow("", img.astype(np.uint8))
-cv2.waitKey(0) 
-cv2.destroyAllWindows()
+def test_dunhuang(kmer_len=256, crop_side_len=512):
+    counters = []
+    for i in range(1, 47):
+        img_path = f"p.1071/img/T{i:07d}.jpg"
+        c = timeit(test_count_kmer, img_path, kmer_len=kmer_len, crop_side_len=crop_side_len)
+        counters.append(c)  
+        if i == 1:
+            icounter = c
+        else:
+            icounter = icounter & c
+        print(f"processed {i} files, intersect unique kmer num is {len(icounter)}")
+    average_ukmer_num = sum([len(c) for c in counters]) / len(counters)
+    print(f"average unique kmer num for each img is {average_ukmer_num}")
 
-# img=cv2.imread("lena_std.tif", cv2.IMREAD_COLOR)
-# img=cv2.imread("len_std.jpg", cv2.IMREAD_COLOR)
-# print(f"img: {type(img)} {img.shape}")
-# yuv=cv2.cvtColor(img, cv2.COLOR_BGR2YUV).astype(np.float32)
-# print(f"yuv: {type(yuv)} {yuv.shape}")
 
-# print(len(img2dna(img)))
+# register coder here
+coders = {
+    0: [i2d_jpg, d2i_jpg],
+    1: [i2d_jpg_64channels, d2i_jpg_64channels],
+    2: [i2d_yuv_1x1, d2i_yuv_1x1],
+    3: [i2d_yuv_8x8, d2i_yuv_8x8],
+}
 
-# b,g,r=split_channels(img)
-# y,u,v=split_channels(yuv)
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        # timeit(test_encode_decode, "demo_data/len_std.jpg")
+        # timeit(test_encode_decode, "demo_data/color_pure.png")
+        # timeit(test_encode_decode, "p.1071\T0000003.jpg", crop_side_len=512)
+        exit(1)
 
-# shape = y.shape
+    # parse arguments
+    print(sys.argv)
+    select_coder = int(sys.argv[1])
+    kmer_len = int(sys.argv[2])
 
-# yp = pad(y)
-# print("yp", yp.shape, yp)
-
-# ypd = dct88(yp)
-# print("ypd", ypd.shape, ypd)
-
-# ypdq = quantify88(ypd, np.full((8,8), 10 ))
-# print("ypdq", ypdq.shape, ypdq)
-
-# ypdq_delta = dc_delta88(ypdq)
-# print("ypdq_delta", ypdq_delta.shape, ypdq_delta, np.sum(ypdq_delta == 115))
-
-# ypdqz = zigzag88(ypdq_delta)
-# print("ypdqz", ypdqz.shape, ypdqz, np.sum(ypdq_delta == 115))
-
-# dna = bytes2dna(ypdqz)
-# print(dna, len(dna))
-
-# cv2.imshow("", yp.astype(np.uint8))
-# cv2.waitKey(0) 
-# cv2.destroyAllWindows()
+    # test
+    img2dna = coders[select_coder][0]
+    dna2img = coders[select_coder][1]
+    with open(f"p.1071/log/log_{strnow('%Y-%m-%d-%H-%M-%S')}.txt", "w", encoding="utf8") as flog:
+        with contextlib.redirect_stdout(flog):
+            print(f"select_coder: {img2dna.__name__}\t{dna2img.__name__}")
+            timeit(test_dunhuang, kmer_len=kmer_len, crop_side_len=512)

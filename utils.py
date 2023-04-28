@@ -1,9 +1,16 @@
 import numpy as np
 import cv2
 from itertools import product
+from collections import Counter
+import time
+import datetime
+import sys
+import os
+import numpy as np
 
-
-
+#########################
+## image process
+#########################
 def pad(src:np.ndarray, base = 8):
     """
     input: 2d ndarray
@@ -30,10 +37,11 @@ def ipad(src:np.ndarray, original_height, original_width):
 def dct88(src:np.ndarray):
     """
     input: 2d ndarray
-    output: same size and dtype ndarray
+    output: same size np.float32 ndarray
     perform dct to each 8*8block (won't automatically pad)
     """
-    dst = np.zeros_like(src, dtype=src.dtype)
+    src = src.astype(np.float32)
+    dst = np.zeros_like(src, dtype=np.float32)
     for i in range(0, src.shape[0], 8):
         for j in range(0, src.shape[1], 8):
             dst[i:i+8, j:j+8] = cv2.dct(src[i:i+8, j:j+8])
@@ -42,10 +50,11 @@ def dct88(src:np.ndarray):
 def idct88(src:np.ndarray):
     """
     input: 2d ndarray
-    output: same size and dtype ndarray
+    output: same size np.float32 ndarray
     perform idct to each 8*8block (won't automatically pad)
     """
-    dst = np.zeros_like(src, dtype=src.dtype)
+    src = src.astype(np.float32)
+    dst = np.zeros_like(src, dtype=np.float32)
     for i in range(0, src.shape[0], 8):
         for j in range(0, src.shape[1], 8):
             dst[i:i+8, j:j+8] = cv2.idct(src[i:i+8, j:j+8])
@@ -73,27 +82,29 @@ chrominance_quantization_table = np.array([
     [99, 99, 99, 99, 99, 99, 99, 99]
 ])
 
-def quantify88(src:np.ndarray, quantification_table:np.ndarray, quantify_type=np.uint8):
+def quantify88(src:np.ndarray, quantification_table:np.ndarray):
     """
     input: src - 2d ndarray. quantification_table: 8x8 ndarray
-    output: 2d quantify_type ndarray. (won't automatically pad)
+    output: 2d np.float32 ndarray. (won't automatically pad or round)
+    perform src / q_table on each 8x8 block
     """
     assert quantification_table.shape == (8, 8)
+    src = src.astype(np.float32)
     dst = np.zeros_like(src, dtype=np.float32)
     for i in range(0, src.shape[0], 8):
         for j in range(0, src.shape[1], 8):
             ir, jr = np.min((i+8, src.shape[0])), np.min((j+8, src.shape[1]))
             dst[i:i+8, j:j+8] = src[i:i+8, j:j+8] / quantification_table[:ir-i, :jr-j]
     assert np.all(dst < 256)
-    return np.around(dst).astype(quantify_type)
+    return dst
 
-def iquantify88(src:np.ndarray, quantification_table:np.ndarray, iquantify_type=np.float32):
+def iquantify88(src:np.ndarray, quantification_table:np.ndarray):
     """
     input: src - 2d ndarray. quantification_table: 8x8 ndarray
-    output: 2d iquantify_type ndarray. (won't automatically pad)
+    output: 2d np.float32 ndarray. (won't automatically pad)
     """
     assert quantification_table.shape == (8, 8)
-    dst = np.zeros_like(src, dtype=iquantify_type)
+    dst = np.zeros_like(src, dtype=np.float32)
     for i in range(0, src.shape[0], 8):
         for j in range(0, src.shape[1], 8):
             ir, jr = np.min((i+8, src.shape[0])), np.min((j+8, src.shape[1]))
@@ -103,9 +114,10 @@ def iquantify88(src:np.ndarray, quantification_table:np.ndarray, iquantify_type=
 def dc_delta88(src:np.ndarray):
     """
     input: 2d ndarray
-    output: same size dtype ndarray
-    perform delta encoding to DC(block88[0][0]) of each 8*8block (won't automatically pad)
+    output: same size np.float32 ndarray
+    perform delta encoding to DC(block88[0][0]) of each 8*8block (won't automatically pad or round)
     """
+    src = src.astype(np.float32)
     dc_first, dc_old = src[0][0], src[0][0]
     # print(type(dc_first))
     for i in range(0, src.shape[0], 8):
@@ -118,9 +130,10 @@ def dc_delta88(src:np.ndarray):
 def dc_idelta88(src:np.ndarray):
     """
     input: 2d ndarray
-    output: same size dtype ndarray
-    perform delta encoding to DC(block88[0][0]) of each 8*8block (won't automatically pad)
+    output: same size np.float32 ndarray
+    perform delta encoding to DC(block88[0][0]) of each 8*8block (won't automatically pad or round)
     """
+    src = src.astype(np.float32)
     dc = src[0][0]
     src[0][0] = 0
     for i in range(0, src.shape[0], 8):
@@ -133,7 +146,7 @@ def zigzag(src:np.ndarray, first_zig_down=False):
     """
     input: 2d ndarray
     first_zig_down: set the first movement to pos(0,0)->pos(1,0), default pos(0,0)->pos(0,1)
-    output: 1d ndarray. zigzag code of src
+    output: same type 1d ndarray. zigzag code of src
     """
     up_side_down = src[::-1,:]
     sign = 1 if up_side_down.shape[0] % 2 == 0 else -1 # assue first_zig_right, make sure first (2*(k % 2)-1)*sign is +1
@@ -141,10 +154,30 @@ def zigzag(src:np.ndarray, first_zig_down=False):
     diags = [np.diagonal(up_side_down, k)[::(2*(k % 2)-1) * sign] for k in range(1-up_side_down.shape[0], up_side_down.shape[1])]
     return np.concatenate(diags)
 
+def zigzag88(src:np.ndarray):
+    """
+    input: 2d ndarray
+    output: same type 1d ndarray
+    perform zigzag to each 8*8block (won't automatically pad)
+    """
+    ret = []
+    for i in range(0, src.shape[0], 8):
+        for j in range(0, src.shape[1], 8):
+            ret.append(zigzag(src[i:i+8, j:j+8]))
+    return np.concatenate(ret)
+
+def fill_diagonal_any(a:np.ndarray, offset:int, values:np.ndarray):
+    if offset >= a.shape[1] or offset <= -a.shape[0]:
+        raise ValueError("偏移量超出数组范围")
+    start_row, start_col = (0, offset) if offset > 0 else (-offset, 0)
+    diagonal_length = np.min((a.shape[0] - start_row, a.shape[1] - start_col))
+    np.fill_diagonal(a[start_row:start_row+diagonal_length, start_col:start_col+diagonal_length], values[:diagonal_length])
+    return a
+
 def izigzag(src:np.ndarray, height:int, width:int, first_zig_down=False):
     """
     input: 1d ndarray. zigzag code
-    output: 2d ndarray.
+    output: same type 2d ndarray.
     """
     dst = np.zeros((height, width), dtype=src.dtype)
     i = 0
@@ -156,22 +189,10 @@ def izigzag(src:np.ndarray, height:int, width:int, first_zig_down=False):
         i += l
     return dst[::-1,:]
 
-def zigzag88(src:np.ndarray):
-    """
-    input: 2d ndarray
-    output: 1d ndarray
-    perform zigzag to each 8*8block (won't automatically pad)
-    """
-    ret = np.array([], dtype=src.dtype)
-    for i in range(0, src.shape[0], 8):
-        for j in range(0, src.shape[1], 8):
-            ret = np.concatenate((ret, zigzag(src[i:i+8, j:j+8])))
-    return ret
-
 def izigzag88(src:np.ndarray, height:int, width:int):
     """
     input: 1d ndarray
-    output: 2d ndarray
+    output: same type 2d ndarray
     perform izigzag to zigzag code, 
     """
     dst = np.zeros((height, width), dtype=src.dtype)
@@ -184,20 +205,23 @@ def izigzag88(src:np.ndarray, height:int, width:int):
             pos += l
     return dst
 
+
+#########################
+## dna process
+#########################
 def bytes2dna(src:np.ndarray):
     """
-    input: 1d ndarray, dtype==np.int8
+    input: 1d ndarray, dtype==np.uint8
     output: ACGT string
     perform 2bit map from bytes to dna sequence
     """
-    assert src.dtype == np.int8
     mapper = list(sorted(["".join(x) for x in product("ACGT", "ACGT", "ACGT", "ACGT")]))
     return "".join([mapper[i] for i in src])
 
 def dna2bytes(dna:str):
     """
     input: ACGT string
-    output: 1d ndarray, dtype==np.int8
+    output: 1d ndarray, dtype==np.uint8
     perform 2bit map from dna sequence to bytes
     """
     # Initialize an empty byte array
@@ -218,46 +242,82 @@ def dna2bytes(dna:str):
                 byte |= 0b11 << (6 - j*2)
         # Add the encoded byte to the byte array
         encoded.append(byte)
-    return np.array(encoded, dtype=np.int8)
+    return np.array(encoded, dtype=np.uint8)
 
-def fill_diagonal_any(a:np.ndarray, offset:int, values:np.ndarray):
-    if offset >= a.shape[1] or offset <= -a.shape[0]:
-        raise ValueError("偏移量超出数组范围")
-    start_row, start_col = (0, offset) if offset > 0 else (-offset, 0)
-    diagonal_length = np.min((a.shape[0] - start_row, a.shape[1] - start_col))
-    np.fill_diagonal(a[start_row:start_row+diagonal_length, start_col:start_col+diagonal_length], values[:diagonal_length])
-    return a
+def count_kmers(sequence:str, k:int, canonical=False):
+    """
+    output: collections.Counter. {kmer:count}
+    """
+    kmers = [sequence[i:i+k] if not canonical else 
+             min(sequence[i:i+k], sequence[i:i+k].translate(str.maketrans("ATCG", "TAGC"))[::-1])
+             for i in range(len(sequence)-k+1)]
+    return Counter(kmers)
 
-def split_channels(src:np.ndarray):
-    """
-    input: 3d ndarray
-    output: n 2d ndarrays, n=input.shape[-1]
-    """
-    return (src[:,:,i] for i in range(src.shape[-1]))
 
-def y2bgr(src:np.ndarray):
-    """
-    input: 2d ndarray
-    output: 3d ndarray. shape=(src.shape[0], src.shape[1], 3)
-    """
-    fill = np.full(src.shape, 0, dtype=src.dtype)
-    return cv2.cvtColor(np.dstack((src, fill, fill)), cv2.COLOR_YUV2BGR)
+#########################
+## test support functions
+#########################
+def timeit(func, *args, **kwargs):
+    print(f"{(80-len(func.__name__))//2*'-'}{func.__name__}{(80-len(func.__name__))//2*'-'}")
+    print("|||||arguments:", args, kwargs, "|||||")
+    start_time = time.time()
+    result = func(*args, **kwargs)
+    end_time = time.time()
+    print(f"Function {func.__name__} took {end_time - start_time:.6f} seconds to run.")
+    print("-"*80)
+    return result
 
-def u2bgr(src:np.ndarray):
-    """
-    input: 2d ndarray
-    output: 3d ndarray. shape=(src.shape[0], src.shape[1], 3)
-    """
-    fill = np.full(src.shape, 0, dtype=src.dtype)
-    return cv2.cvtColor(np.dstack((fill, src, fill)), cv2.COLOR_YUV2BGR)
+def assert_file_exist(filename):
+    if not os.path.isfile(filename):
+        print(f"Error: File '{filename}' does not exist.")
+        sys.exit(1)
 
-def v2bgr(src:np.ndarray):
+def center_crop(mat: np.ndarray, n: int) -> np.ndarray:
     """
-    input: 2d ndarray
-    output: 3d ndarray. shape=(src.shape[0], src.shape[1], 3)
+    从 numpy 矩阵中截取前两维中心部分的子矩阵。
+    
+    Args:
+    - mat: 输入的 numpy 矩阵。
+    - n: 子矩阵的边长。
+    
+    Returns:
+    - 截取后的子矩阵，也是一个 numpy 矩阵。
     """
-    fill = np.full(src.shape, 0, dtype=src.dtype)
-    return cv2.cvtColor(np.dstack((fill, fill, src)), cv2.COLOR_YUV2BGR)
+    # 获取输入矩阵的高度和宽度
+    h, w = mat.shape[:2]
+    # 计算新矩阵的左上角和右下角坐标
+    y1 = int((h - n) / 2)
+    y2 = y1 + n
+    x1 = int((w - n) / 2)
+    x2 = x1 + n
+    # 返回中心部分的子矩阵
+    return mat[y1:y2, x1:x2]
+
+def strnow(format:str):
+    return datetime.datetime.now().strftime(format)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -286,3 +346,4 @@ if __name__ == "__main__":
     print(izigzag(b, 4,3))
     print(izigzag(c, 4,4))
     print(izigzag(d, 3,3))
+
